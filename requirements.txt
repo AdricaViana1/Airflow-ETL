@@ -1,0 +1,5 @@
+selenium==4.8.2
+beautifulsoup4
+webdriver_manager==3.8.5
+chromedriver-autoinstaller
+elasticsearch==8.5.2
