@@ -88,21 +88,112 @@ services:
   elasticsearch:
     image: docker.elastic.co/elasticsearch/elasticsearch:8.6.0
     container_name: elasticsearch_compose
+    volumes:    
+      - esdata1:/usr/share/elasticsearch/data
+      - .certs:/usr/share/elasticsearch/config/certs
+    ports:
+      - 9100:9100
+    user: "0"
+    command: >
+      bash -c '
+        if [ x$  == x ]; then
+          echo "Set the ELASTIC_PASSWORD environment variable in the .env file";
+          exit 1;
+        elif [ x$  == x ]; then
+          echo "Set the KIBANA_PASSWORD environment variable in the .env file";
+          exit 1;
+        fi;
+        if [ ! -f config/certs/ca.zip ]; then
+          echo "Creating CA";
+          bin/elasticsearch-certutil ca --silent --pem -out config/certs/ca.zip;
+          unzip config/certs/ca.zip -d config/certs;
+        fi;
+        if [ ! -f config/certs/certs.zip ]; then
+          echo "Creating certs";
+          echo -ne \
+          "instances:\n"\
+          "  - name: elasticsearch_compose\n"\
+          "    dns:\n"\
+          "      - elasticsearch_compose\n"\
+          "      - localhost\n"\
+          "    ip:\n"\
+          "      - 127.0.0.1\n"\
+          > config/certs/instances.yml;
+          bin/elasticsearch-certutil cert --silent --pem -out config/certs/certs.zip --in config/certs/instances.yml --ca-cert config/certs/ca/ca.crt --ca-key config/certs/ca/ca.key;
+          unzip config/certs/certs.zip -d config/certs;
+        fi;
+        echo "Setting file permissions"
+        chown -R root:root config/certs;
+        find . -type d -exec chmod 750 \{\} \;;
+        find . -type f -exec chmod 640 \{\} \;;
+        echo "Waiting for Elasticsearch availability";
+        until curl -s --cacert config/certs/ca.crt https://elasticsearch:9100 | grep -q "missing authentication credentials"; do sleep 30; done;
+        echo "Setting kibana_system password";
+        until curl -s -X POST --cacert config/certs/ca.crt -u "elastic:" -H "Content-Type: application/json" https://elasticsearch:9100/_security/user/kibana_system/_password -d "{\"password\":\"\"}" | grep -q "^{}"; do sleep 10; done;
+        echo "All done!";
+      '
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s --cacert config/certs/elasticsearch/elasticsearch.crt https://localhost:9100 | grep -q 'missing authentication credentials'",]
+      interval: 1s
+      timeout: 5s
+      retries: 120
     environment:
+      - http.host=127.0.0.1
+      - transport.host=127.0.0.1
+      - node.name=elasticsearch_compose
       - cluster.name=docker-cluster
-      - bootstrap.memory_lock=true
-      - "ES_JAVA_OPTS=-Xms1g -Xmx1g"
-    mem_limit: 1073741824
+      - discovery.seed_hosts=elasticsearch_compose
+      - cluster.initial_master_nodes=elasticsearch_compose
+#      - xpack.security.transport.ssl.enabled=false
+#      - xpack.security.enabled=false
+      - xpack.security.http.ssl.enabled=true
+      - xpack.security.http.ssl.key=certs/elasticsearch/elasticsearch.key
+      - xpack.security.http.ssl.certificate=certs/elasticsearch/elasticsearch.crt
+      - xpack.security.http.ssl.certificate_authorities=certs/ca/ca.crt
+      - xpack.security.transport.ssl.enabled=true
+      - xpack.security.transport.ssl.key=certs/elasticsearch/elasticsearch.key
+      - xpack.security.transport.ssl.certificate=certs/elasticsearch/elasticsearch.crt
+      - xpack.security.transport.ssl.certificate_authorities=certs/ca/ca.crt
+      - xpack.security.transport.ssl.verification_mode=certificate
+      - xpack.license.self_generated.type=basic
+    networks:
+      - es-net
+    mem_limit: 2g
     ulimits:
       memlock:
         soft: -1
         hard: -1
+
+
+  
+  kibana:
+    depends_on:
+      - elasticsearch   
+    image: docker.elastic.co/kibana/kibana:8.6.0
     volumes:
-      - esdata1:/usr/share/elasticsearch/data
+      - certs:/usr/share/kibana/config/certs
+      - kibanadata:/usr/share/kibana/data
     ports:
-      - 9100:9100
+      - 5501:5501
+    environment:
+      - SERVERNAME=kibana
+      - ELASTICSEARCH_HOSTS=http://elasticsearch:9100
+      - ELASTICSEARCH_USERNAME=kibana_system
+      - ELASTICSEARCH_PASSWORD=
+      - ELASTICSEARCH_SSL_CERTIFICATEAUTHORITIES=config/certs/ca/ca.crt
     networks:
-      - esnet        
+      - es-net
+    mem_limit: 2g
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "curl -s -I http://localhost:5501 | grep -q 'HTTP/1.1 302 Found'",
+        ]
+      interval: 10s
+      timeout: 10s
+      retries: 120
+
 
   selenium-hub:
     image: selenium/hub:latest
@@ -343,8 +434,13 @@ services:
 
 volumes:
   postgres-db-volume:
+  certs:
+    driver: local
   esdata1:
+    driver: local
+  kibanadata:
     driver: local
 
 networks:
-  esnet:
+  es-net:
+    driver: bridge
