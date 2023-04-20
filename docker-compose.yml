@@ -24,7 +24,7 @@
 # The following variables are supported:
 #
 # AIRFLOW_IMAGE_NAME           - Docker image name used to run Airflow.
-#                                Default: apache/airflow:2.5.2
+#                                Default: apache/airflow:2.5.3
 # AIRFLOW_UID                  - User ID in Airflow containers
 #                                Default: 50000
 # AIRFLOW_PROJ_DIR             - Base path to which all the files will be volumed.
@@ -43,14 +43,14 @@
 #                                Default: ''
 #
 # Feel free to modify this file to suit your needs.
----
+
 version: '3.8'
 x-airflow-common:
   &airflow-common
   # In order to add custom dependencies or upgrade provider packages you can use your extended image.
   # Comment the image line, place your Dockerfile in the directory where you placed the docker-compose.yaml
   # and uncomment the "build" line below, Then run `docker-compose build` to build the images.
-  #image: ${AIRFLOW_IMAGE_NAME:-apache/airflow:2.5.2}
+  #image: ${AIRFLOW_IMAGE_NAME:-apache/airflow:2.5.3}
   build: .
   environment:
     &airflow-common-env
@@ -64,6 +64,7 @@ x-airflow-common:
     AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
     AIRFLOW__CORE__LOAD_EXAMPLES: 'true'
     AIRFLOW__API__AUTH_BACKENDS: 'airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session'
+    AIRFLOW__SCHEDULER__SCHEDULE_AFTER_TASK_EXECUTION: 'false'
     # yamllint disable rule:line-length
     # Use simple http server on scheduler for health checks
     # See https://airflow.apache.org/docs/apache-airflow/stable/administration-and-deployment/logging-monitoring/check-health.html#scheduler-health-check-server
@@ -73,9 +74,12 @@ x-airflow-common:
     # for other purpose (development, test and especially production usage) build/extend Airflow image.
     _PIP_ADDITIONAL_REQUIREMENTS: ${_PIP_ADDITIONAL_REQUIREMENTS:-}
   volumes:
-    - ${AIRFLOW_PROJ_DIR:-.}/dags:/opt/airflow/dags
-    - ${AIRFLOW_PROJ_DIR:-.}/logs:/opt/airflow/logs
-    - ${AIRFLOW_PROJ_DIR:-.}/plugins:/opt/airflow/plugins
+    #- ${AIRFLOW_PROJ_DIR:-.}/dags:/opt/airflow/dags
+    #- ${AIRFLOW_PROJ_DIR:-.}/logs:/opt/airflow/logs
+    #- ${AIRFLOW_PROJ_DIR:-.}/plugins:/opt/airflow/plugins
+    - ./dags:/opt/airflow/dags
+    - ./logs:/opt/airflow/logs
+    - ./plugins:/opt/airflow/plugins
   user: "${AIRFLOW_UID:-50000}:0"
   depends_on:
     &airflow-common-depends-on
@@ -83,117 +87,233 @@ x-airflow-common:
       condition: service_healthy
     postgres:
       condition: service_healthy
+  networks:
+  - elastic
 
 services:
-  elasticsearch:
-    image: docker.elastic.co/elasticsearch/elasticsearch:8.6.0
-    container_name: elasticsearch_compose
+  setup:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.7.0
     volumes:    
-      - esdata1:/usr/share/elasticsearch/data
-      - .certs:/usr/share/elasticsearch/config/certs
-    ports:
-      - 9100:9100
+      - certs:/usr/share/elasticsearch/config/certs
     user: "0"
     command: >
-      bash -c '
-        if [ x$  == x ]; then
-          echo "Set the ELASTIC_PASSWORD environment variable in the .env file";
-          exit 1;
-        elif [ x$  == x ]; then
-          echo "Set the KIBANA_PASSWORD environment variable in the .env file";
-          exit 1;
-        fi;
-        if [ ! -f config/certs/ca.zip ]; then
-          echo "Creating CA";
-          bin/elasticsearch-certutil ca --silent --pem -out config/certs/ca.zip;
-          unzip config/certs/ca.zip -d config/certs;
-        fi;
-        if [ ! -f config/certs/certs.zip ]; then
-          echo "Creating certs";
-          echo -ne \
-          "instances:\n"\
-          "  - name: elasticsearch_compose\n"\
-          "    dns:\n"\
-          "      - elasticsearch_compose\n"\
-          "      - localhost\n"\
-          "    ip:\n"\
-          "      - 127.0.0.1\n"\
-          > config/certs/instances.yml;
-          bin/elasticsearch-certutil cert --silent --pem -out config/certs/certs.zip --in config/certs/instances.yml --ca-cert config/certs/ca/ca.crt --ca-key config/certs/ca/ca.key;
-          unzip config/certs/certs.zip -d config/certs;
-        fi;
-        echo "Setting file permissions"
-        chown -R root:root config/certs;
-        find . -type d -exec chmod 750 \{\} \;;
-        find . -type f -exec chmod 640 \{\} \;;
-        echo "Waiting for Elasticsearch availability";
-        until curl -s --cacert config/certs/ca.crt https://elasticsearch:9100 | grep -q "missing authentication credentials"; do sleep 30; done;
-        echo "Setting kibana_system password";
-        until curl -s -X POST --cacert config/certs/ca.crt -u "elastic:" -H "Content-Type: application/json" https://elasticsearch:9100/_security/user/kibana_system/_password -d "{\"password\":\"\"}" | grep -q "^{}"; do sleep 10; done;
-        echo "All done!";
-      '
+        bash -c '
+                if [ x${ELASTIC_PASSWORD} == x ]; then
+                  echo "Set the ELASTIC_PASSWORD environment variable in the .env file";
+                  exit 1;
+                elif [ x${KIBANA_PASSWORD} == x ]; then
+                  echo "Set the KIBANA_PASSWORD environment variable in the .env file";
+                  exit 1;
+                fi;
+                if [ ! -f config/certs/ca.zip ]; then
+                  echo "Creating CA";
+                  bin/elasticsearch-certutil ca --silent --pem -out config/certs/ca.zip;
+                  unzip config/certs/ca.zip -d config/certs;
+                fi;
+                if [ ! -f config/certs/certs.zip ]; then
+                  echo "Creating certs";
+                  echo -ne \
+                  "instances:\n"\
+                  "  - name: es01\n"\
+                  "    dns:\n"\
+                  "      - es01\n"\
+                  "      - localhost\n"\
+                  "    ip:\n"\
+                  "      - 127.0.0.1\n"\
+                  "  - name: es02\n"\
+                  "    dns:\n"\
+                  "      - es02\n"\
+                  "      - localhost\n"\
+                  "    ip:\n"\
+                  "      - 127.0.0.1\n"\
+                  "  - name: es03\n"\
+                  "    dns:\n"\
+                  "      - es03\n"\
+                  "      - localhost\n"\
+                  "    ip:\n"\
+                  "      - 127.0.0.1\n"\
+                  > config/certs/instances.yml;
+                  bin/elasticsearch-certutil cert --silent --pem -out config/certs/certs.zip --in config/certs/instances.yml --ca-cert config/certs/ca/ca.crt --ca-key config/certs/ca/ca.key;
+                  unzip config/certs/certs.zip -d config/certs;
+                fi;
+                echo "Setting file permissions"
+                chown -R root:root config/certs;
+                find . -type d -exec chmod 750 \{\} \;;
+                find . -type f -exec chmod 640 \{\} \;;
+                echo "Waiting for Elasticsearch availability";
+                until curl -s --cacert config/certs/ca/ca.crt https://es01:9200 | grep -q "missing authentication credentials"; do sleep 30; done;
+                echo "Setting kibana_system password";
+                until curl -s -X POST --cacert config/certs/ca/ca.crt -u "elastic:${KIBANA_PASSWORD}" -H "Content-Type: application/json" https://es01:9200/_security/user/kibana_system/_password -d "{\"password\":\"\"}" | grep -q "^{}"; do sleep 10; done;
+                echo "All done!";
+              '
     healthcheck:
-      test: ["CMD-SHELL", "curl -s --cacert config/certs/elasticsearch/elasticsearch.crt https://localhost:9100 | grep -q 'missing authentication credentials'",]
-      interval: 1s
+      test:  ["CMD-SHELL", "[ -f config/certs/es01/es01.crt ]"]
+      interval: 10s
       timeout: 5s
       retries: 120
+    networks:
+      - elastic
+
+  es01:
+    depends_on:
+      setup:
+        condition: service_healthy
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.7.0
+    volumes:
+      - certs:/usr/share/elasticsearch/config/certs
+      - esdata01:/usr/share/elasticsearch/data
+    ports:
+      - 9200:9200
     environment:
-      - http.host=127.0.0.1
-      - transport.host=127.0.0.1
-      - node.name=elasticsearch_compose
+      - node.name=es01
       - cluster.name=docker-cluster
-      - discovery.seed_hosts=elasticsearch_compose
-      - cluster.initial_master_nodes=elasticsearch_compose
-#      - xpack.security.transport.ssl.enabled=false
-#      - xpack.security.enabled=false
+      - cluster.initial_master_nodes=es01,es02,es03
+      - discovery.seed_hosts=es02,es03 
+      - ELASTIC_PASSWORD=${ELASTIC_PASSWORD}     
+      - bootstrap.memory_lock=true      
+      - xpack.security.enabled=true
       - xpack.security.http.ssl.enabled=true
-      - xpack.security.http.ssl.key=certs/elasticsearch/elasticsearch.key
-      - xpack.security.http.ssl.certificate=certs/elasticsearch/elasticsearch.crt
+      - xpack.security.http.ssl.key=certs/es01/es01.key
+      - xpack.security.http.ssl.certificate=certs/es01/es01.crt
       - xpack.security.http.ssl.certificate_authorities=certs/ca/ca.crt
       - xpack.security.transport.ssl.enabled=true
-      - xpack.security.transport.ssl.key=certs/elasticsearch/elasticsearch.key
-      - xpack.security.transport.ssl.certificate=certs/elasticsearch/elasticsearch.crt
+      - xpack.security.transport.ssl.key=certs/es01/es01.key
+      - xpack.security.transport.ssl.certificate=certs/es01/es01.crt
       - xpack.security.transport.ssl.certificate_authorities=certs/ca/ca.crt
       - xpack.security.transport.ssl.verification_mode=certificate
       - xpack.license.self_generated.type=basic
-    networks:
-      - es-net
     mem_limit: 2g
     ulimits:
       memlock:
         soft: -1
         hard: -1
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "curl -s --cacert config/certs/ca/ca.crt https://localhost:9200 | grep -q 'missing authentication credentials'",
+        ]
+      interval: 10s
+      timeout: 10s
+      retries: 120
+    networks:
+      - elastic
 
 
+  es02:
+    depends_on:
+      - es01
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.7.0
+    volumes:
+      - certs:/usr/share/elasticsearch/config/certs
+      - esdata02:/usr/share/elasticsearch/data
+    environment:
+      - node.name=es02
+      - cluster.name=docker-cluster
+      - cluster.initial_master_nodes=es01,es02,es03
+      - discovery.seed_hosts=es01,es03      
+      - bootstrap.memory_lock=true
+      - xpack.security.enabled=true
+      - xpack.security.http.ssl.enabled=true
+      - xpack.security.http.ssl.key=certs/es02/es02.key
+      - xpack.security.http.ssl.certificate=certs/es02/es02.crt
+      - xpack.security.http.ssl.certificate_authorities=certs/ca/ca.crt
+      - xpack.security.transport.ssl.enabled=true
+      - xpack.security.transport.ssl.key=certs/es02/es02.key
+      - xpack.security.transport.ssl.certificate=certs/es02/es02.crt
+      - xpack.security.transport.ssl.certificate_authorities=certs/ca/ca.crt
+      - xpack.security.transport.ssl.verification_mode=certificate
+      - xpack.license.self_generated.type=basic
+    mem_limit: 2g
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "curl -s --cacert config/certs/ca/ca.crt https://localhost:9200 | grep -q 'missing authentication credentials'",
+        ]
+      interval: 10s
+      timeout: 10s
+      retries: 120
+    networks:
+      - elastic
+
+  es03:
+    depends_on:
+      - es02
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.7.0
+    volumes:
+      - certs:/usr/share/elasticsearch/config/certs
+      - esdata03:/usr/share/elasticsearch/data
+    environment:
+      - node.name=es03
+      - cluster.name=docker-cluster
+      - discovery.seed_hosts=es01,es02
+      - cluster.initial_master_nodes=es01,es02,es03
+      - bootstrap.memory_lock=true
+      - xpack.security.enabled=true
+      - xpack.security.http.ssl.enabled=true
+      - xpack.security.http.ssl.key=certs/es03/es03.key
+      - xpack.security.http.ssl.certificate=certs/es03/es03.crt
+      - xpack.security.http.ssl.certificate_authorities=certs/ca/ca.crt
+      - xpack.security.transport.ssl.enabled=true
+      - xpack.security.transport.ssl.key=certs/es03/es03.key
+      - xpack.security.transport.ssl.certificate=certs/es03/es03.crt
+      - xpack.security.transport.ssl.certificate_authorities=certs/ca/ca.crt
+      - xpack.security.transport.ssl.verification_mode=certificate
+      - xpack.license.self_generated.type=basic
+    mem_limit: 2g
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "curl -s --cacert config/certs/ca/ca.crt https://localhost:9200 | grep -q 'missing authentication credentials'",
+        ]
+      interval: 10s
+      timeout: 10s
+      retries: 120
+    networks:
+      - elastic
   
   kibana:
     depends_on:
-      - elasticsearch   
-    image: docker.elastic.co/kibana/kibana:8.6.0
+      es01:
+        condition: service_healthy
+      es02:
+        condition: service_healthy
+      es03:
+        condition: service_healthy  
+    image: docker.elastic.co/kibana/kibana:8.7.0
     volumes:
       - certs:/usr/share/kibana/config/certs
       - kibanadata:/usr/share/kibana/data
     ports:
-      - 5501:5501
+      - 5601:5601
     environment:
       - SERVERNAME=kibana
-      - ELASTICSEARCH_HOSTS=http://elasticsearch:9100
+      - ELASTICSEARCH_HOSTS=https://es01:9200
       - ELASTICSEARCH_USERNAME=kibana_system
-      - ELASTICSEARCH_PASSWORD=
+      - ELASTICSEARCH_PASSWORD=${KIBANA_PASSWORD}
       - ELASTICSEARCH_SSL_CERTIFICATEAUTHORITIES=config/certs/ca/ca.crt
-    networks:
-      - es-net
     mem_limit: 2g
     healthcheck:
       test:
         [
           "CMD-SHELL",
-          "curl -s -I http://localhost:5501 | grep -q 'HTTP/1.1 302 Found'",
+          "curl -s -I http://localhost:5601 | grep -q 'HTTP/1.1 302 Found'",
         ]
       interval: 10s
       timeout: 10s
       retries: 120
-
+    networks:
+      - elastic
 
   selenium-hub:
     image: selenium/hub:latest
@@ -202,6 +322,8 @@ services:
       - "4442:4442"
       - "4443:4443"
       - "4444:4444"
+    networks:
+      - elastic
 
   chrome:
     image: selenium/standalone-chrome:latest
@@ -215,13 +337,17 @@ services:
       - SE_NODE_MAX_SESSIONS=3
       - SE_NODE_OVERRIDE_MAX_SESSIONS=true
       - SE_NODE_GRID_URL=http://localhost:4444/
-      
+    networks:
+        - elastic
+
   myapp:
     build: .
     depends_on:
       - chrome
     environment:
-      - SELENIUM_REMOTE_URL=http://chrome:4445/wd/hub   
+      - SELENIUM_REMOTE_URL=http://chrome:4445/wd/hub  
+    networks:
+        - elastic
 
   postgres:
     image: postgres:13
@@ -237,6 +363,8 @@ services:
       retries: 5
       start_period: 5s
     restart: always
+    networks:
+        - elastic
 
   redis:
     image: redis:latest
@@ -249,6 +377,8 @@ services:
       retries: 50
       start_period: 30s
     restart: always
+    networks:
+        - elastic
 
   airflow-webserver:
     <<: *airflow-common
@@ -266,14 +396,16 @@ services:
       <<: *airflow-common-depends-on
       airflow-init:
         condition: service_completed_successfully
-
+    networks:
+      - elastic
+  
   airflow-scheduler:
     <<: *airflow-common
     command: scheduler
     healthcheck:
       test: ["CMD", "curl", "--fail", "http://localhost:8974/health"]
       interval: 30s
-      timeout: 10s
+      timeout: 10s 
       retries: 5
       start_period: 30s
     restart: always
@@ -281,6 +413,8 @@ services:
       <<: *airflow-common-depends-on
       airflow-init:
         condition: service_completed_successfully
+    networks:
+      - elastic
 
   airflow-worker:
     <<: *airflow-common
@@ -303,6 +437,8 @@ services:
       <<: *airflow-common-depends-on
       airflow-init:
         condition: service_completed_successfully
+    networks:
+      - elastic
 
   airflow-triggerer:
     <<: *airflow-common
@@ -318,6 +454,8 @@ services:
       <<: *airflow-common-depends-on
       airflow-init:
         condition: service_completed_successfully
+    networks:
+      - elastic
 
   airflow-init:
     <<: *airflow-common
@@ -396,6 +534,9 @@ services:
     user: "0:0"
     volumes:
       - ${AIRFLOW_PROJ_DIR:-.}:/sources
+    networks:
+      - elastic
+     
 
   airflow-cli:
     <<: *airflow-common
@@ -409,6 +550,8 @@ services:
       - bash
       - -c
       - airflow
+    networks:
+      - elastic
 
   # You can enable flower by adding "--profile flower" option e.g. docker-compose --profile flower up
   # or by explicitly targeted on the command line e.g. docker-compose up flower.
@@ -431,16 +574,22 @@ services:
       <<: *airflow-common-depends-on
       airflow-init:
         condition: service_completed_successfully
+    networks:
+      - elastic
 
 volumes:
   postgres-db-volume:
   certs:
     driver: local
-  esdata1:
+  esdata01:
+    driver: local
+  esdata02:
+    driver: local
+  esdata03:
     driver: local
   kibanadata:
     driver: local
-
+  
 networks:
-  es-net:
+  elastic:
     driver: bridge
