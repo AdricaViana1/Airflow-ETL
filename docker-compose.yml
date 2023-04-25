@@ -58,11 +58,11 @@ x-airflow-common:
     AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
     # For backward compatibility, with Airflow <2.3
     AIRFLOW__CORE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
-    AIRFLOW__CELERY__RESULT_BACKEND: db+postgresql://airflow:airflow@postgres/airflow
+    AIRFLOW__CELERY__RESULT_BACKEND: redis://:@redis:6379/0
     AIRFLOW__CELERY__BROKER_URL: redis://:@redis:6379/0
     AIRFLOW__CORE__FERNET_KEY: ''
     AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
-    AIRFLOW__CORE__LOAD_EXAMPLES: 'true'
+    AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
     AIRFLOW__API__AUTH_BACKENDS: 'airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session'
     AIRFLOW__SCHEDULER__SCHEDULE_AFTER_TASK_EXECUTION: 'false'
     # yamllint disable rule:line-length
@@ -73,13 +73,17 @@ x-airflow-common:
     # WARNING: Use _PIP_ADDITIONAL_REQUIREMENTS option ONLY for a quick checks
     # for other purpose (development, test and especially production usage) build/extend Airflow image.
     _PIP_ADDITIONAL_REQUIREMENTS: ${_PIP_ADDITIONAL_REQUIREMENTS:-}
+
+    AIRFLOW_WEBSERVER_EXPOSE_CONFIG: 'true'
+    AIRFLOW_SCHEDULER_MIN_FILE_PROCESS_INTERVAL: 5
+    AIRFLOW_SCHEDULER_DAG_DIR_LIST_INTERVAL: 20 
+
+    AIRFLOW__CELERY_PREFETCH_MULTIPLIER: 1
+    AIRFLOW__CELERY_WORKER_CONCURRENCY: 4
   volumes:
-    #- ${AIRFLOW_PROJ_DIR:-.}/dags:/opt/airflow/dags
-    #- ${AIRFLOW_PROJ_DIR:-.}/logs:/opt/airflow/logs
-    #- ${AIRFLOW_PROJ_DIR:-.}/plugins:/opt/airflow/plugins
-    - ./dags:/opt/airflow/dags
-    - ./logs:/opt/airflow/logs
-    - ./plugins:/opt/airflow/plugins
+    - ${AIRFLOW_PROJ_DIR:-.}/dags:/opt/airflow/dags
+    - ${AIRFLOW_PROJ_DIR:-.}/logs:/opt/airflow/logs
+    - ${AIRFLOW_PROJ_DIR:-.}/plugins:/opt/airflow/plugins
   user: "${AIRFLOW_UID:-50000}:0"
   depends_on:
     &airflow-common-depends-on
@@ -199,7 +203,6 @@ services:
     networks:
       - elastic
 
-
   es02:
     depends_on:
       - es01
@@ -282,39 +285,6 @@ services:
     networks:
       - elastic
   
-  kibana:
-    depends_on:
-      es01:
-        condition: service_healthy
-      es02:
-        condition: service_healthy
-      es03:
-        condition: service_healthy  
-    image: docker.elastic.co/kibana/kibana:8.7.0
-    volumes:
-      - certs:/usr/share/kibana/config/certs
-      - kibanadata:/usr/share/kibana/data
-    ports:
-      - 5601:5601
-    environment:
-      - SERVERNAME=kibana
-      - ELASTICSEARCH_HOSTS=https://es01:9200
-      - ELASTICSEARCH_USERNAME=kibana_system
-      - ELASTICSEARCH_PASSWORD=${KIBANA_PASSWORD}
-      - ELASTICSEARCH_SSL_CERTIFICATEAUTHORITIES=config/certs/ca/ca.crt
-    mem_limit: 2g
-    healthcheck:
-      test:
-        [
-          "CMD-SHELL",
-          "curl -s -I http://localhost:5601 | grep -q 'HTTP/1.1 302 Found'",
-        ]
-      interval: 10s
-      timeout: 10s
-      retries: 120
-    networks:
-      - elastic
-
   selenium-hub:
     image: selenium/hub:latest
     container_name: selenium-hub
@@ -379,6 +349,11 @@ services:
     restart: always
     networks:
         - elastic
+
+  celery:
+    image: celery  
+    networks:
+      - elastic
 
   airflow-webserver:
     <<: *airflow-common
@@ -449,7 +424,7 @@ services:
       timeout: 10s
       retries: 5
       start_period: 30s
-    restart: always
+    restart: always 
     depends_on:
       <<: *airflow-common-depends-on
       airflow-init:
@@ -579,6 +554,9 @@ services:
 
 volumes:
   postgres-db-volume:
+  logs:
+  dags:
+  plugins:
   certs:
     driver: local
   esdata01:
@@ -589,6 +567,7 @@ volumes:
     driver: local
   kibanadata:
     driver: local
+
   
 networks:
   elastic:
